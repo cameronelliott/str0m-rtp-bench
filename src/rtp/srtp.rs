@@ -179,6 +179,96 @@ impl SrtpContext {
         }
     }
 
+    pub fn protect_rtp2(
+        &mut self,
+        buf: &[u8],
+        output: &mut [u8],
+        header: &RtpHeader,
+        srtp_index: u64, // same as ext_seq
+    ) -> usize {
+        // SRTP layout
+        // [header, [rtp, (padding + pad_count)], tag]
+
+        //     0                   1                   2                   3
+        //     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+        //    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+<+
+        //    |V=2|P|X|  CC   |M|     PT      |       sequence number         | |
+        //    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ |
+        //    |                           timestamp                           | |
+        //    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ |
+        //    |           synchronization source (SSRC) identifier            | |
+        //    +=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+=+ |
+        //    |            contributing source (CSRC) identifiers             | |
+        //    |                               ....                            | |
+        //    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ |
+        //    |                   RTP extension (OPTIONAL)                    | |
+        //  +>+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ |
+        //  | |                          payload  ...                         | |
+        //  | |                               +-------------------------------+ |
+        //  | |                               | RTP padding   | RTP pad count | |
+        //  +>+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+<+
+        //  | ~                     SRTP MKI (OPTIONAL)                       ~ |
+        //  | +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ |
+        //  | :                 authentication tag (RECOMMENDED)              : |
+        //  | +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+ |
+        //  |                                                                   |
+        //  +- Encrypted Portion*                      Authenticated Portion ---+
+        let hlen = header.header_len;
+        let input = &buf[hlen..];
+
+        match &mut self.rtp {
+            Derived::Aes128CmSha1_80 {
+                hmac, salt, enc, ..
+            } => {
+                assert!(
+                    input.len() % SRTP_BLOCK_SIZE == 0,
+                    "RTP body should be padded to 16 byte block size, {header:?} with body length {} was not", input.len()
+                );
+                use aes_128_cm_sha1_80::{RtpHmac, ToRtpIv, HMAC_TAG_LEN};
+
+                let iv = salt.rtp_iv(*header.ssrc, srtp_index);
+
+                assert!(
+                    output.len() >= buf.len() + HMAC_TAG_LEN,
+                    "output buffer too small"
+                );
+                //let mut output = vec![0_u8; buf.len() + HMAC_TAG_LEN];
+                enc.encrypt(&iv, input, &mut output[hlen..])
+                    .expect("rtp encrypt");
+
+                output[..hlen].copy_from_slice(&buf[..hlen]);
+
+                let hmac_start = buf.len();
+                hmac.rtp_hmac(output, srtp_index, hmac_start);
+
+                //output
+                buf.len() + HMAC_TAG_LEN
+            }
+            Derived::AeadAes128Gcm { salt, enc, .. } => {
+                use aead_aes_128_gcm::{ToRtpIv, TAG_LEN};
+                let roc = (srtp_index >> 16) as u32;
+
+                let iv = salt.rtp_iv(*header.ssrc, roc, header.sequence_number);
+                let aad = &buf[..hlen];
+
+                // Input and output lengths for encryption: https://www.rfc-editor.org/rfc/rfc7714#section-5.2.1
+
+                assert!(
+                    output.len() >= buf.len() + TAG_LEN,
+                    "output buffer too small"
+                );
+                //let mut output = vec![0_u8; buf.len() + TAG_LEN];
+                enc.encrypt(&iv, aad, input, &mut output[hlen..])
+                    .expect("rtp encrypt");
+
+                output[..hlen].copy_from_slice(aad);
+
+                //output
+                buf.len() + TAG_LEN
+            }
+        }
+    }
+
     pub fn unprotect_rtp(
         &mut self,
         buf: &[u8],
@@ -980,7 +1070,194 @@ mod aead_aes_128_gcm {
 
 #[cfg(test)]
 mod test {
+    //    use std::fmt::Result;
+
+    use crate::rtp_::srtp::aead_aes_128_gcm::TAG_LEN;
+
     use super::*;
+    extern crate test;
+    use test::Bencher;
+
+    #[bench]
+    fn bench_aead_aes_128_gcm(b: &mut Bencher) -> Result<(), openssl::error::ErrorStack> {
+        let mut rng = rand::thread_rng();
+        let mut key = [0u8; 16];
+        rand::Rng::fill(&mut rng, &mut key);
+
+        //let mut enc = crate::rtp_::srtp::aes_128_cm_sha1_80::Encrypter::new(key);
+        const N: usize = 500;
+        let mut enc = crate::rtp_::srtp::aead_aes_128_gcm::Encrypter::new(&key);
+        let iv = [0u8; 12];
+        let input = [0u8; N];
+        let output = &mut [0u8; N + 16];
+        let aad = [0u8; 12];
+        b.iter(|| -> Result<(), openssl::error::ErrorStack> {
+            enc.encrypt(&iv, &aad, &input, output)?;
+            Ok(())
+        });
+        b.bytes = 500;
+        Ok(())
+    }
+
+    #[bench]
+    fn bench_protect_rtp_aes128_cm_sha1_80(
+        b: &mut Bencher,
+    ) -> Result<(), openssl::error::ErrorStack> {
+        let key: [u8; 128 / 8] = core::array::from_fn(|i| (i) as u8);
+        let salt: [u8; 112 / 8] = core::array::from_fn(|i| (i) as u8);
+
+        let mut ksks = Vec::new();
+        ksks.extend_from_slice(&key);
+        ksks.extend_from_slice(&salt);
+        ksks.extend_from_slice(&key);
+        ksks.extend_from_slice(&salt);
+
+        //let key: [u8; 128 / 8 + 112 / 8] = core::array::from_fn(|i| (i) as u8);
+        let km = &KeyingMaterial::new(&ksks);
+        let mut ctx = SrtpContext::new(SrtpProfile::Aes128CmSha1_80, km, true);
+
+        let input = [0u8; 500 / 16 * 16];
+
+        let mut header = RtpHeader::default();
+        let mut srtp_index = 1;
+
+        b.iter(|| -> Result<(), openssl::error::ErrorStack> {
+            header.sequence_number = srtp_index as u16;
+            let l = ctx.protect_rtp(&input, &header, srtp_index).len();
+            assert!(l == 506);
+            srtp_index += 1;
+            Ok(())
+        });
+        b.bytes = 500;
+        Ok(())
+    }
+
+    #[bench]
+    fn bench_protect_rtp2_aes128_cm_sha1_80(
+        b: &mut Bencher,
+    ) -> Result<(), openssl::error::ErrorStack> {
+        let key: [u8; 128 / 8] = core::array::from_fn(|i| (i) as u8);
+        let salt: [u8; 112 / 8] = core::array::from_fn(|i| (i) as u8);
+
+        let mut ksks = Vec::new();
+        ksks.extend_from_slice(&key);
+        ksks.extend_from_slice(&salt);
+        ksks.extend_from_slice(&key);
+        ksks.extend_from_slice(&salt);
+
+        //let key: [u8; 128 / 8 + 112 / 8] = core::array::from_fn(|i| (i) as u8);
+        let km = &KeyingMaterial::new(&ksks);
+        let mut ctx = SrtpContext::new(SrtpProfile::Aes128CmSha1_80, km, true);
+        let input = [0u8; 500 / 16 * 16];
+        let mut header = RtpHeader::default();
+        let mut srtp_index = 1;
+        let mut output = [0u8; 500 / 16 * 16 + 16];
+
+        b.iter(|| -> Result<(), openssl::error::ErrorStack> {
+            header.sequence_number = srtp_index as u16;
+            let l = ctx.protect_rtp2(&input, &mut output, &header, srtp_index);
+            assert!(l == 506);
+            srtp_index += 1;
+            Ok(())
+        });
+        b.bytes = 500;
+        Ok(())
+    }
+
+
+    #[bench]
+    fn bench_protect_rtp2_aead_aes128_gcm(
+        b: &mut Bencher,
+    ) -> Result<(), openssl::error::ErrorStack> {
+        let key: [u8; 128 / 8] = core::array::from_fn(|i| (i) as u8);
+        let salt: [u8; 96 / 8] = core::array::from_fn(|i| (i) as u8);
+
+        let mut ksks = Vec::new();
+        ksks.extend_from_slice(&key);
+        ksks.extend_from_slice(&salt);
+        ksks.extend_from_slice(&key);
+        ksks.extend_from_slice(&salt);
+
+        //let key: [u8; 128 / 8 + 112 / 8] = core::array::from_fn(|i| (i) as u8);
+        let km = &KeyingMaterial::new(&ksks);
+        let mut ctx = SrtpContext::new(SrtpProfile::AeadAes128Gcm, km, true);
+        let input = [0u8; 500 / 16 * 16];
+        let mut header = RtpHeader::default();
+        let mut srtp_index = 1;
+        let mut output = [0u8; 500 / 16 * 16 + 16];
+
+        b.iter(|| -> Result<(), openssl::error::ErrorStack> {
+            header.sequence_number = srtp_index as u16;
+            let l = ctx.protect_rtp2(&input, &mut output, &header, srtp_index);
+            println!("l: {}", l);
+            assert!(l == 500 / 16 * 16+TAG_LEN);
+            srtp_index += 1;
+            Ok(())
+        });
+        b.bytes = 500;
+        Ok(())
+    }
+
+
+    #[bench]
+    fn bench_protect_rtp_aead_aes128_gcm(
+        b: &mut Bencher,
+    ) -> Result<(), openssl::error::ErrorStack> {
+        let key: [u8; 128 / 8] = core::array::from_fn(|i| (i) as u8);
+        let salt: [u8; 96 / 8] = core::array::from_fn(|i| (i) as u8);
+
+        let mut ksks = Vec::new();
+        ksks.extend_from_slice(&key);
+        ksks.extend_from_slice(&salt);
+        ksks.extend_from_slice(&key);
+        ksks.extend_from_slice(&salt);
+
+        //let key: [u8; 128 / 8 + 112 / 8] = core::array::from_fn(|i| (i) as u8);
+        let km = &KeyingMaterial::new(&ksks);
+        let mut ctx = SrtpContext::new(SrtpProfile::AeadAes128Gcm, km, true);
+        let input = [0u8; 500 / 16 * 16];
+        let mut header = RtpHeader::default();
+        let mut srtp_index = 1;
+        
+
+        b.iter(|| -> Result<(), openssl::error::ErrorStack> {
+            header.sequence_number = srtp_index as u16;
+            let l = ctx.protect_rtp(&input,&header, srtp_index).len();
+            println!("l: {}", l);
+            assert!(l == 500 / 16 * 16+TAG_LEN);
+            srtp_index += 1;
+            Ok(())
+        });
+        b.bytes = 500;
+        Ok(())
+    }
+
+
+    #[bench]
+    fn bench_aes_128_cm_sha1_80(b: &mut Bencher) -> Result<(), openssl::error::ErrorStack> {
+        const N: usize = 500;
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let mut enc = crate::rtp_::srtp::aes_128_cm_sha1_80::Encrypter::new(key);
+        let iv_orig: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let input_orig: [u8; N] = core::array::from_fn(|i| i as u8);
+        let mut input = [0u8; N];
+        let output = &mut [0u8; N];
+
+        let mut iv = [0u8; 16];
+        let mut seqno: u16 = 0;
+
+        b.iter(|| -> Result<(), openssl::error::ErrorStack> {
+            iv.copy_from_slice(&iv_orig);
+            input.copy_from_slice(&input_orig);
+            input[2] = (seqno >> 8) as u8;
+            input[3] = seqno as u8;
+            seqno += 1;
+            enc.encrypt(&iv, &input, output)?;
+            Ok(())
+        });
+        b.bytes = 500;
+        Ok(())
+    }
 
     #[test]
     fn derive_key() {
@@ -1094,7 +1371,7 @@ mod test {
 
         use super::*;
 
-        use super::aead_aes_128_gcm::*;
+        //use super::aead_aes_128_gcm::*;
 
         mod rfc7714 {
             // Test vectors from RFC7714

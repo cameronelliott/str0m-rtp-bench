@@ -576,6 +576,8 @@
 #![allow(clippy::assertions_on_constants)]
 #![allow(clippy::manual_range_contains)]
 #![deny(missing_docs)]
+#![allow(missing_docs)]
+#![feature(test)]
 
 #[macro_use]
 extern crate tracing;
@@ -607,8 +609,11 @@ use io::DatagramRecv;
 
 mod packet;
 
+
+
+
 #[path = "rtp/mod.rs"]
-mod rtp_;
+pub mod rtp_;
 use rtp_::Bitrate;
 use rtp_::{Extension, ExtensionMap};
 
