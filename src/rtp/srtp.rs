@@ -1078,13 +1078,14 @@ mod test {
     extern crate test;
     use test::Bencher;
 
+
     #[bench]
-    fn bench_openssl_ver(_b: &mut Bencher) {
+    fn bench_openssl_ver_1_1_1w(_b: &mut Bencher) {
         // will not display without flags
         //println!("openssl ver {}", openssl::version::version());
         //yuck: assert_eq!(openssl::version::number(), 0x1_01_01_00_0);
-        assert_eq!(openssl::version::version(),"nope!"); // report version as failure
- 
+        assert!(openssl::version::version().starts_with("OpenSSL 1.1.1w  11 Sep 2023")); // report version as failure
+        //assert_eq!(openssl::version::version(), "nope!"); // report version as failure
     }
     #[bench]
     fn bench_aead_aes_128_gcm(b: &mut Bencher) -> Result<(), openssl::error::ErrorStack> {
