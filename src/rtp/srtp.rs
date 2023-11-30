@@ -1170,7 +1170,6 @@ mod test {
         Ok(())
     }
 
-
     #[bench]
     fn bench_protect_rtp2_aead_aes128_gcm(
         b: &mut Bencher,
@@ -1187,23 +1186,22 @@ mod test {
         //let key: [u8; 128 / 8 + 112 / 8] = core::array::from_fn(|i| (i) as u8);
         let km = &KeyingMaterial::new(&ksks);
         let mut ctx = SrtpContext::new(SrtpProfile::AeadAes128Gcm, km, true);
-        let input = [0u8; 500 / 16 * 16];
+        let input: [u8; 500] = core::array::from_fn(|i| (i) as u8);
         let mut header = RtpHeader::default();
         let mut srtp_index = 1;
-        let mut output = [0u8; 500 / 16 * 16 + 16];
+        let mut output = [0u8; 500 + TAG_LEN];
 
         b.iter(|| -> Result<(), openssl::error::ErrorStack> {
             header.sequence_number = srtp_index as u16;
             let l = ctx.protect_rtp2(&input, &mut output, &header, srtp_index);
-            println!("l: {}", l);
-            assert!(l == 500 / 16 * 16+TAG_LEN);
+            assert!(l == 500 + TAG_LEN);
+            //ctx.protect_rtp2(&input, &mut output, &header, srtp_index);
             srtp_index += 1;
             Ok(())
         });
         b.bytes = 500;
         Ok(())
     }
-
 
     #[bench]
     fn bench_protect_rtp_aead_aes128_gcm(
@@ -1221,23 +1219,20 @@ mod test {
         //let key: [u8; 128 / 8 + 112 / 8] = core::array::from_fn(|i| (i) as u8);
         let km = &KeyingMaterial::new(&ksks);
         let mut ctx = SrtpContext::new(SrtpProfile::AeadAes128Gcm, km, true);
-        let input = [0u8; 500 / 16 * 16];
+        let input: [u8; 500] = core::array::from_fn(|i| (i) as u8);
         let mut header = RtpHeader::default();
         let mut srtp_index = 1;
-        
 
         b.iter(|| -> Result<(), openssl::error::ErrorStack> {
             header.sequence_number = srtp_index as u16;
-            let l = ctx.protect_rtp(&input,&header, srtp_index).len();
-            println!("l: {}", l);
-            assert!(l == 500 / 16 * 16+TAG_LEN);
+            let l = ctx.protect_rtp(&input, &header, srtp_index).len();
+            assert!(l == 500 + TAG_LEN);
             srtp_index += 1;
             Ok(())
         });
         b.bytes = 500;
         Ok(())
     }
-
 
     #[bench]
     fn bench_aes_128_cm_sha1_80(b: &mut Bencher) -> Result<(), openssl::error::ErrorStack> {
