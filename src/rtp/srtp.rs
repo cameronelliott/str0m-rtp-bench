@@ -1122,16 +1122,15 @@ mod test {
         //let key: [u8; 128 / 8 + 112 / 8] = core::array::from_fn(|i| (i) as u8);
         let km = &KeyingMaterial::new(&ksks);
         let mut ctx = SrtpContext::new(SrtpProfile::Aes128CmSha1_80, km, true);
-
-        let input = [0u8; 500 / 16 * 16];
-
+        let input: [u8; 500 / 16 * 16] = core::array::from_fn(|i| (i) as u8);
         let mut header = RtpHeader::default();
         let mut srtp_index = 1;
 
         b.iter(|| -> Result<(), openssl::error::ErrorStack> {
             header.sequence_number = srtp_index as u16;
             let l = ctx.protect_rtp(&input, &header, srtp_index).len();
-            assert!(l == 506);
+
+            assert!(l == 500 / 16 * 16 + aes_128_cm_sha1_80::HMAC_TAG_LEN);
             srtp_index += 1;
             Ok(())
         });
