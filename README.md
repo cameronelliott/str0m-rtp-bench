@@ -6,6 +6,9 @@ Find the real str0m [here][str0m]
 
 *this is a tweaked version of str0m, specifically with six SRTP benchmarks*
 
+This was on an intel 12400 CPU with 4400 MHz RAM.
+(Crucial 16GB Ballistix MAX DDR4 44000 MHz UDIMM 288-pin)
+
 When I run `cargom +nightly bench` I get:
 
 ```text
