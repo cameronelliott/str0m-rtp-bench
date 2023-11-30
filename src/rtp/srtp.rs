@@ -1088,15 +1088,13 @@ mod test {
     }
     #[bench]
     fn bench_aead_aes_128_gcm(b: &mut Bencher) -> Result<(), openssl::error::ErrorStack> {
-        let mut rng = rand::thread_rng();
-        let mut key = [0u8; 16];
-        rand::Rng::fill(&mut rng, &mut key);
+        let key: [u8; 16] = core::array::from_fn(|i| i as u8);
 
         //let mut enc = crate::rtp_::srtp::aes_128_cm_sha1_80::Encrypter::new(key);
         const N: usize = 500;
         let mut enc = crate::rtp_::srtp::aead_aes_128_gcm::Encrypter::new(&key);
         let iv = [0u8; 12];
-        let input = [0u8; N];
+        let input: [u8; N] = core::array::from_fn(|i| i as u8);
         let output = &mut [0u8; N + 16];
         let aad = [0u8; 12];
         b.iter(|| -> Result<(), openssl::error::ErrorStack> {
